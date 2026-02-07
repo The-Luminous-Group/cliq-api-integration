@@ -1,0 +1,32 @@
+{
+  "name": "cliq-api-integration",
+  "version": "0.1.0",
+  "description": "MCP server for Zoho Cliq — post messages, list channels, reply to threads",
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "index.ts",
+  "scripts": {
+    "dev": "node --import tsx index.ts",
+    "build": "tsc --noEmit && npx esbuild index.ts --bundle --platform=node --target=node18 --format=esm --outfile=dist/index.js --minify --external:@modelcontextprotocol/sdk --external:zod",
+    "test": "node --import tsx test/test-api.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "tsx": "^4.0.0",
+    "esbuild": "^0.19.0"
+  },
+  "keywords": [
+    "mcp",
+    "zoho",
+    "cliq",
+    "chat",
+    "team-communication"
+  ],
+  "author": "Luminous Group",
+  "license": "MIT"
+}
