@@ -1,17 +1,16 @@
 /**
  * Zoho Cliq API client.
  *
- * Uses OAuth 2.0 for authentication with access tokens stored in config file or 1Password.
+ * Sends messages via bot incoming webhook (zapikey from 1Password).
+ * Lists channels via OAuth access token (refresh token from 1Password).
  *
  * References:
+ * - https://www.zoho.com/cliq/help/platform/webhook-tokens.html
+ * - https://www.zoho.com/cliq/help/platform/bot-incomingwebhookhandler.html
  * - https://www.zoho.com/cliq/help/restapi/v2/
- * - https://www.zoho.com/cliq/help/platform/post-to-channel.html
  */
 
-import { readFileSync, writeFileSync, existsSync } from "fs";
 import { execSync } from "child_process";
-import { homedir } from "os";
-import { join } from "path";
 
 // ---------- types ----------
 
@@ -21,69 +20,79 @@ export interface CliqChannel {
   unique_name: string;
 }
 
-export interface CliqMessage {
-  text: string;
-  channelId?: string;
-  chatId?: string;
-  userId?: string;
-}
-
 export interface SendMessageInput {
   text: string;
-  channelId?: string;
   channelName?: string;
   chatId?: string;
   userId?: string;
 }
 
-interface ApiResponse {
-  data: unknown;
-  error: string | null;
-}
+// ---------- config ----------
+
+const BASE_URL = "https://cliq.zoho.com/api/v2";
+const BOT_NAME = process.env.CLIQ_BOT_NAME || "guidobarton";
+const DEFAULT_CHANNEL = process.env.CLIQ_DEFAULT_CHANNEL || "luminous";
+const WEBHOOK_OP_ITEM = process.env.CLIQ_WEBHOOK_OP_ITEM || "Cliq luminous-agent-api";
+const OAUTH_OP_ITEM = process.env.CLIQ_OAUTH_OP_ITEM || "cliq.zoho.com";
 
 // ---------- auth ----------
 
-const CONFIG_PATH = join(homedir(), ".cliq-api-config.json");
-const OP_ITEM_ID = process.env.CLIQ_OP_ITEM || "cliq.zoho.com";
-const BASE_URL = process.env.CLIQ_BASE_URL || "https://cliq.zoho.com/api/v2";
+let cachedZapikey: string | null = null;
+let cachedOAuthToken: string | null = null;
+let oauthExpiresAt = 0;
 
-// In-memory token cache
-let cachedToken: string | null = null;
-
-function loadToken(): string | null {
-  if (cachedToken) return cachedToken;
-
-  // 1. Environment variable
-  const envToken = process.env.CLIQ_ACCESS_TOKEN;
-  if (envToken) {
-    cachedToken = envToken;
-    return cachedToken;
-  }
-
-  // 2. Config file
-  if (existsSync(CONFIG_PATH)) {
-    try {
-      const config = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
-      if (config.access_token && config.expires_at && Date.now() < config.expires_at) {
-        cachedToken = config.access_token;
-        return cachedToken;
-      }
-    } catch {
-      // Fall through to 1Password
-    }
-  }
-
-  // 3. 1Password (refresh token stored there)
+function opGet(item: string, field: string): string | null {
   try {
     const result = execSync(
-      `op item get "${OP_ITEM_ID}" --fields label=refresh_token --format json`,
-      { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }
+      `op item get "${item}" --fields label=${field} --format json`,
+      { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
     );
     const parsed = JSON.parse(result);
-    const refreshToken = parsed.find((f: { label: string }) => f.label === "refresh_token")?.value;
+    return Array.isArray(parsed)
+      ? parsed.find((f: { label: string }) => f.label === field)?.value ?? null
+      : parsed.value ?? null;
+  } catch {
+    return null;
+  }
+}
 
-    if (refreshToken) {
-      return refreshAccessToken(refreshToken);
+function getZapikey(): string | null {
+  if (cachedZapikey) return cachedZapikey;
+
+  const envKey = process.env.CLIQ_ZAPIKEY;
+  if (envKey) {
+    cachedZapikey = envKey;
+    return cachedZapikey;
+  }
+
+  cachedZapikey = opGet(WEBHOOK_OP_ITEM, "credential");
+  return cachedZapikey;
+}
+
+function getOAuthToken(): string | null {
+  if (cachedOAuthToken && Date.now() < oauthExpiresAt) return cachedOAuthToken;
+
+  const refreshToken = opGet(OAUTH_OP_ITEM, "refresh_token");
+  if (!refreshToken) return null;
+
+  const clientId = opGet(OAUTH_OP_ITEM, "client_id");
+  const clientSecret = opGet(OAUTH_OP_ITEM, "client_secret");
+  if (!clientId || !clientSecret) return null;
+
+  try {
+    const result = execSync(
+      `curl -s -X POST 'https://accounts.zoho.com/oauth/v2/token' ` +
+        `-d 'refresh_token=${refreshToken}' ` +
+        `-d 'client_id=${clientId}' ` +
+        `-d 'client_secret=${clientSecret}' ` +
+        `-d 'grant_type=refresh_token'`,
+      { encoding: "utf8", timeout: 15000, stdio: ["pipe", "pipe", "pipe"] },
+    );
+    const response = JSON.parse(result);
+    if (response.access_token) {
+      cachedOAuthToken = response.access_token;
+      oauthExpiresAt = Date.now() + (response.expires_in || 3600) * 1000;
+      return cachedOAuthToken;
     }
   } catch {
     // Fall through
@@ -92,128 +101,42 @@ function loadToken(): string | null {
   return null;
 }
 
-function refreshAccessToken(refreshToken: string): string | null {
-  try {
-    // Get client credentials from 1Password
-    const clientIdResult = execSync(
-      `op item get "${OP_ITEM_ID}" --fields label=client_id --format json`,
-      { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }
-    );
-    const clientSecretResult = execSync(
-      `op item get "${OP_ITEM_ID}" --fields label=client_secret --format json`,
-      { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }
-    );
-
-    const clientId = JSON.parse(clientIdResult).find((f: { label: string }) => f.label === "client_id")?.value;
-    const clientSecret = JSON.parse(clientSecretResult).find((f: { label: string }) => f.label === "client_secret")?.value;
-
-    if (!clientId || !clientSecret) return null;
-
-    // Refresh the token
-    const result = execSync(
-      `curl -s -X POST 'https://accounts.zoho.com/oauth/v2/token' ` +
-      `-d 'refresh_token=${refreshToken}' ` +
-      `-d 'client_id=${clientId}' ` +
-      `-d 'client_secret=${clientSecret}' ` +
-      `-d 'grant_type=refresh_token'`,
-      { encoding: "utf8", timeout: 15000, stdio: ["pipe", "pipe", "pipe"] }
-    );
-
-    const response = JSON.parse(result);
-    if (response.access_token) {
-      const token = response.access_token;
-      const expiresIn = response.expires_in || 3600; // Default 1 hour
-
-      // Cache to file
-      try {
-        writeFileSync(
-          CONFIG_PATH,
-          JSON.stringify({
-            access_token: token,
-            expires_at: Date.now() + expiresIn * 1000,
-            created: new Date().toISOString(),
-            source: "1password-refresh",
-          }),
-          { mode: 0o600 }
-        );
-      } catch {
-        // Non-fatal
-      }
-
-      cachedToken = token;
-      return token;
-    }
-  } catch {
-    return null;
-  }
-
-  return null;
-}
-
-function clearTokenCache(): void {
-  cachedToken = null;
-  try {
-    if (existsSync(CONFIG_PATH)) {
-      writeFileSync(CONFIG_PATH, "{}", { mode: 0o600 });
-    }
-  } catch {
-    // ignore
-  }
-}
-
 // ---------- HTTP helpers ----------
 
-async function apiRequest(
-  endpoint: string,
-  method: "GET" | "POST" | "PUT" | "DELETE" = "GET",
-  body?: unknown
-): Promise<ApiResponse> {
-  const token = loadToken();
-  if (!token) {
-    return { data: null, error: "No access token available. Check CLIQ_ACCESS_TOKEN env var or 1Password item." };
-  }
+function curlJson(
+  url: string,
+  method: "GET" | "POST",
+  headers: Record<string, string>,
+  body?: unknown,
+): { data: unknown; status: number } {
+  const headerFlags = Object.entries(headers)
+    .map(([k, v]) => `-H '${k}: ${v}'`)
+    .join(" ");
 
-  const url = endpoint.startsWith("http") ? endpoint : `${BASE_URL}${endpoint}`;
+  const bodyStr = body ? JSON.stringify(body) : "";
+  const bodyFlag = body ? `-d '${bodyStr.replace(/'/g, "'\\''")}'` : "";
 
+  const cmd =
+    `curl -s -o /tmp/cliq-mcp-response.txt -w "%{http_code}" ` +
+    `-X ${method} '${url}' ${headerFlags} ${bodyFlag}`;
+
+  const statusStr = execSync(cmd, {
+    encoding: "utf8",
+    timeout: 30000,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+
+  const status = parseInt(statusStr, 10);
+  let data: unknown = null;
   try {
-    const bodyStr = body ? JSON.stringify(body) : "";
-    const curlCmd =
-      `curl -s -X ${method} '${url}' ` +
-      `-H 'Authorization: Zoho-oauthtoken ${token}' ` +
-      `-H 'Content-Type: application/json' ` +
-      (body ? `-d '${bodyStr.replace(/'/g, "'\\''")}'` : "");
-
-    const result = execSync(curlCmd, {
-      encoding: "utf8",
-      timeout: 30000,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    const data = JSON.parse(result);
-
-    // Check for 401 and retry with fresh token
-    if (data.code === "INVALID_OAUTH" || data.code === "OAUTH_EXPIRED") {
-      clearTokenCache();
-      const newToken = loadToken();
-      if (!newToken) {
-        return { data: null, error: "Failed to refresh access token" };
-      }
-
-      // Retry with new token
-      const retryCmd = curlCmd.replace(`Zoho-oauthtoken ${token}`, `Zoho-oauthtoken ${newToken}`);
-      const retryResult = execSync(retryCmd, {
-        encoding: "utf8",
-        timeout: 30000,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-
-      return { data: JSON.parse(retryResult), error: null };
-    }
-
-    return { data, error: null };
-  } catch (err) {
-    return { data: null, error: err instanceof Error ? err.message : String(err) };
+    const { readFileSync } = require("fs");
+    const raw = readFileSync("/tmp/cliq-mcp-response.txt", "utf8");
+    if (raw) data = JSON.parse(raw);
+  } catch {
+    // Empty body (204) or non-JSON response
   }
+
+  return { data, status };
 }
 
 // ---------- API functions ----------
@@ -222,11 +145,23 @@ export async function listChannels(): Promise<{
   channels: CliqChannel[];
   error: string | null;
 }> {
-  const { data, error } = await apiRequest("/channels");
-  if (error || !data) return { channels: [], error };
+  const token = getOAuthToken();
+  if (!token) {
+    return { channels: [], error: "No OAuth token available. Check 1Password item 'cliq.zoho.com'." };
+  }
+
+  const { data, status } = curlJson(
+    `${BASE_URL}/channels`,
+    "GET",
+    { Authorization: `Zoho-oauthtoken ${token}`, "Content-Type": "application/json" },
+  );
+
+  if (status < 200 || status >= 300) {
+    return { channels: [], error: `HTTP ${status}: ${JSON.stringify(data)}` };
+  }
 
   const response = data as { channels?: Array<{ id: string; name: string; unique_name: string }> };
-  if (!response.channels) return { channels: [], error: "Unexpected response format" };
+  if (!response?.channels) return { channels: [], error: "Unexpected response format" };
 
   return {
     channels: response.channels.map((c) => ({
@@ -239,56 +174,28 @@ export async function listChannels(): Promise<{
 }
 
 export async function sendMessage(input: SendMessageInput): Promise<{
-  message: unknown;
+  success: boolean;
   error: string | null;
 }> {
   if (!input.text) {
-    return { message: null, error: "Message text is required" };
+    return { success: false, error: "Message text is required" };
   }
 
-  let endpoint: string;
-
-  if (input.channelId) {
-    endpoint = `/channels/${input.channelId}/messages`;
-  } else if (input.channelName) {
-    endpoint = `/channelsbyname/${input.channelName}/message`;
-  } else if (input.chatId) {
-    endpoint = `/chats/${input.chatId}/messages`;
-  } else if (input.userId) {
-    endpoint = `/users/${input.userId}/messages`;
-  } else {
-    return { message: null, error: "Must specify channelId, channelName, chatId, or userId" };
+  const zapikey = getZapikey();
+  if (!zapikey) {
+    return { success: false, error: "No webhook token available. Check 1Password item 'Cliq luminous-agent-api'." };
   }
 
-  const payload = {
-    text: input.text,
-    sync_message: true,
-  };
+  const channel = input.channelName || DEFAULT_CHANNEL;
+  const url = `${BASE_URL}/bots/${BOT_NAME}/incoming?zapikey=${zapikey}`;
 
-  const { data, error } = await apiRequest(endpoint, "POST", payload);
-  if (error || !data) return { message: null, error };
+  const payload: Record<string, string> = { text: input.text, channel };
 
-  return { message: data, error: null };
-}
+  const { status, data } = curlJson(url, "POST", { "Content-Type": "application/json" }, payload);
 
-export async function replyToMessage(input: {
-  messageId: string;
-  text: string;
-}): Promise<{
-  reply: unknown;
-  error: string | null;
-}> {
-  if (!input.text || !input.messageId) {
-    return { reply: null, error: "Message ID and text are required" };
+  if (status >= 200 && status < 300) {
+    return { success: true, error: null };
   }
 
-  const payload = {
-    text: input.text,
-    parent_message_id: input.messageId,
-  };
-
-  const { data, error } = await apiRequest("/messages", "POST", payload);
-  if (error || !data) return { reply: null, error };
-
-  return { reply: data, error: null };
+  return { success: false, error: `HTTP ${status}: ${JSON.stringify(data)}` };
 }

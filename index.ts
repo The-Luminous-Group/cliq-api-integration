@@ -3,11 +3,12 @@
 /**
  * MCP server for Zoho Cliq.
  *
- * Provides tools to send messages, list channels, and reply to threads
- * in a Zoho Cliq workspace. Uses OAuth 2.0 with access tokens.
+ * Sends messages as a bot via incoming webhook (zapikey from 1Password).
+ * Lists channels via OAuth access token.
  *
- * Auth: Set CLIQ_ACCESS_TOKEN env var, or store refresh_token in 1Password
- * item "cliq.zoho.com" along with client_id and client_secret.
+ * Auth:
+ * - Webhook token: 1Password item "Cliq luminous-agent-api" (field: credential)
+ * - OAuth: 1Password item "cliq.zoho.com" (fields: refresh_token, client_id, client_secret)
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -17,17 +18,8 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
-import {
-  listChannels,
-  sendMessage,
-  replyToMessage,
-} from "./lib/cliq-api.js";
-
-import {
-  ListChannelsSchema,
-  SendMessageSchema,
-  ReplyToMessageSchema,
-} from "./lib/schemas.js";
+import { listChannels, sendMessage } from "./lib/cliq-api.js";
+import { ListChannelsSchema, SendMessageSchema } from "./lib/schemas.js";
 
 const CLIQ_TOOLS = [
   {
@@ -41,8 +33,7 @@ const CLIQ_TOOLS = [
   {
     name: "cliq_send_message",
     description:
-      "Send a message to a Zoho Cliq channel, chat, or user. " +
-      "Specify one of: channelId, channelName (unique name), chatId, or userId.",
+      "Send a message to a Zoho Cliq channel. Specify one of: channelId, channelName (unique name), chatId, or userId.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -50,21 +41,9 @@ const CLIQ_TOOLS = [
           type: "string",
           description: "Message text to send (required).",
         },
-        channelId: {
-          type: "string",
-          description: "Channel ID (from cliq_list_channels).",
-        },
         channelName: {
           type: "string",
-          description: "Channel unique name (e.g., 'engineering-team').",
-        },
-        chatId: {
-          type: "string",
-          description: "Chat ID for direct messages or group chats.",
-        },
-        userId: {
-          type: "string",
-          description: "User ID to send a direct message.",
+          description: "Channel unique name (e.g., 'engineering-team'). Defaults to 'luminous'.",
         },
       },
       required: ["text"],
@@ -94,7 +73,7 @@ const CLIQ_TOOLS = [
 // ---------- server setup ----------
 
 const server = new Server(
-  { name: "cliq-api-integration", version: "0.1.0" },
+  { name: "cliq-api-integration", version: "0.2.0" },
   { capabilities: { tools: {} } },
 );
 
@@ -133,25 +112,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: "text",
-              text: `Message sent successfully.\n${JSON.stringify(result.message, null, 2)}`,
+              text: `Message sent to #${validated.channelName || "luminous"} as bot.`,
             },
           ],
         };
       }
 
       case "cliq_reply_to_message": {
-        const validated = ReplyToMessageSchema.parse(args);
-        const result = await replyToMessage(validated);
-        if (result.error) {
-          return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
-        }
         return {
-          content: [
-            {
-              type: "text",
-              text: `Reply sent successfully.\n${JSON.stringify(result.reply, null, 2)}`,
-            },
-          ],
+          content: [{ type: "text", text: "Reply-to-message is not yet supported via bot webhook." }],
+          isError: true,
         };
       }
 
