@@ -262,6 +262,7 @@ export async function sendMessage(input: SendMessageInput): Promise<{
 
   const payload = {
     text: input.text,
+    sync_message: true,
   };
 
   const { data, error } = await apiRequest(endpoint, "POST", payload);
