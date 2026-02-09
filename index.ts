@@ -74,7 +74,7 @@ const CLIQ_TOOLS = [
 
 const server = new Server(
   { name: "cliq-api-integration", version: "0.2.0" },
-  { capabilities: { tools: {} } },
+  { capabilities: { resources: {}, tools: {}, prompts: {} } },
 );
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
