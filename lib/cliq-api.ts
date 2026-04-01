@@ -11,6 +11,7 @@
  */
 
 import { execSync } from "child_process";
+import { readFileSync } from "fs";
 
 // ---------- types ----------
 
@@ -129,7 +130,6 @@ function curlJson(
   const status = parseInt(statusStr, 10);
   let data: unknown = null;
   try {
-    const { readFileSync } = require("fs");
     const raw = readFileSync("/tmp/cliq-mcp-response.txt", "utf8");
     if (raw) data = JSON.parse(raw);
   } catch {
